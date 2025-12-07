@@ -1,0 +1,253 @@
+# Importing data (Mostly re-used from part 1 of the project)
+folder_training_0 = '/Users/prathampaliwal/Downloads/Lego_dataset_2/training'
+folder_training_1 = '/Users/prathampaliwal/Downloads/Lego_dataset_2/testing'
+im_width = 64
+
+# Class name prefixes used in filenames (updated for new dataset)
+classes = ['2x1', 'cir', 'rec', 'squ']
+
+
+def get_data(folder, im_width, n_samples):
+    # Load flattened grayscale images and labels for the raw-pixel
+    # (basically carry over from Stage 1) classifier.
+
+    file_names = sorted(
+        [f for f in os.listdir(folder) if f.lower().endswith('.png')]
+    )
+    n_samples = min(n_samples, len(file_names))
+
+    x = np.empty((n_samples, im_width**2))
+    y = np.empty((n_samples, 1))
+
+    for i in range(n_samples):
+        fname = file_names[i]
+        path = os.path.join(folder, fname)
+
+        im = Image.open(path).convert('L')      # grayscale
+        im = im.resize((im_width, im_width))    # resize to im_width × im_width
+        im_array = np.array(im)
+        x[i, :] = im_array.reshape(1, -1)
+
+        # assign label by filename prefix (updated 2b1 -> 2x1)
+        if fname.startswith('2x1'):
+            y[i, 0] = 0
+        elif fname.startswith('cir'):
+            y[i, 0] = 1
+        elif fname.startswith('rec'):
+            y[i, 0] = 2
+        elif fname.startswith('squ'):
+            y[i, 0] = 3
+
+    return x, y
+
+
+# For part 2 of the project, we need to load 2D images so we can compute
+# engineered shape features and do feature selection
+
+def load_images_and_labels(folder, im_width):
+    # Loading images as 2D grayscale arrays and labels (same mapping as get_data).
+    # This is for the engineered-feature (Stage 2) pipeline.
+
+    file_names = sorted(
+        [f for f in os.listdir(folder) if f.lower().endswith('.png')]
+    )
+    n_samples = len(file_names)
+
+    images = []
+    labels = []
+
+    for i in range(n_samples):
+        fname = file_names[i]
+        path = os.path.join(folder, fname)
+
+        im = Image.open(path).convert('L')
+        im = im.resize((im_width, im_width))   # keep 64×64
+        im_array = np.array(im)               # shape (im_width, im_width)
+        images.append(im_array)
+
+        # same label rules as get_data (updated 2b1 -> 2x1)
+        if fname.startswith('2x1'):
+            labels.append(0)
+        elif fname.startswith('cir'):
+            labels.append(1)
+        elif fname.startswith('rec'):
+            labels.append(2)
+        elif fname.startswith('squ'):
+            labels.append(3)
+
+    images = np.stack(images, axis=0)
+    labels = np.array(labels, dtype=int)
+
+    print(f"Loaded {len(labels)} images from {folder}")
+    print(f"Image shape: {images.shape[1:]}")
+
+    return images, labels
+
+
+# Just checking to ensure all the data (our lego images) has been imported correctly 
+print("Training folder contents:")
+print(os.listdir(folder_training_0))
+
+print("\nTesting folder contents:")
+print(os.listdir(folder_training_1))
+
+
+# ---------------
+# Cell 2
+# ---------------
+
+def extract_features_from_image(img_2d):
+
+    # Take one 2D grayscale image (64x64) and return a feature vector.
+    # Simple mask + simple shape/intensity features.
+    
+    # Convert to float in [0, 1]
+    gray = img_2d.astype(float) / 255.0
+
+    # Simple global threshold for mask (assume piece is darker than background)
+    thresh = gray.mean()
+    mask = gray < thresh
+
+    # Fallback if mask is degenerate (all True or all False)
+    if mask.sum() == 0 or mask.sum() == mask.size:
+        thresh = np.median(gray)
+        mask = gray < thresh
+
+    if mask.sum() == 0:
+        # Still failed: return zeros
+        return np.zeros(23)
+
+    # Get coordinates of piece pixels
+    rows, cols = np.where(mask)
+
+    # Basic geometry
+    area = mask.sum()
+    min_r, max_r = rows.min(), rows.max()
+    min_c, max_c = cols.min(), cols.max()
+    bbox_h = max_r - min_r + 1
+    bbox_w = max_c - min_c + 1
+    aspect_ratio = bbox_w / bbox_h if bbox_h > 0 else 0.0
+
+    # How much of the image and bbox are filled
+    image_fill = area / mask.size
+    bbox_fill = area / (bbox_h * bbox_w)
+
+    # Centroid (relative to image size)
+    row_center = rows.mean() / gray.shape[0]
+    col_center = cols.mean() / gray.shape[1]
+
+    # Spread of the piece (variance of row/col positions)
+    row_var = rows.var()
+    col_var = cols.var()
+
+    # Intensity features inside the piece
+    piece_pixels = gray[mask]
+    mean_intensity = piece_pixels.mean()
+    std_intensity = piece_pixels.std()
+    min_intensity = piece_pixels.min()
+    max_intensity = piece_pixels.max()
+
+    # Collect features (14 total)
+    features = [
+        area,
+        bbox_h, bbox_w, aspect_ratio,
+        image_fill, bbox_fill,
+        row_center, col_center,
+        row_var, col_var,
+        mean_intensity, std_intensity,
+        min_intensity, max_intensity
+    ]
+
+    return np.array(features, dtype=float)
+
+# -------------------
+# Cell 3
+# -------------------
+
+[18:16, 2025-12-06] Pratham: # This function does: it trains Pipeline 2 (engineered features + Logistic Regression, no SFS) on a given training folder.
+# It:
+# - reads all Lego images from the folder at 'path' and extracts engineered features,
+# - scales the feature matrix with StandardScaler,
+# - fits a logistic regression classifier on all engineered features (no feature selection),
+# and returns the trained classifier and the fitted scaler so the same preprocessing can be applied to the testing set.
+
+def training_function(path, im_width=64):
+    # 1) Load full engineered feature set from the training folder
+    X_full, y = load_feature_dataset(path, im_width)
+
+    # 2) Scale features
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X_full)
+
+    # 3) Train logistic regression on all engineered features
+    clf = LogisticRegression(max_iter=3000)
+    clf.fit(X_scaled, y)
+
+    # 4) Evaluate on training set
+    y_pred_train = clf.predict(X_scaled)
+    cm_train = confusion_matrix(y, y_pred_train)
+    acc_train = accuracy_score(y, y_pred_train)
+
+    print("Pipeline 2 (engineered, no SFS + Logistic Regression) - TRAIN confusion matrix:")
+    print(cm_train)
+    print(f"Pipeline 2 (engineered Features , no SFS + Logistic Regression) - TRAIN accuracy: {acc_train:.4f}")
+
+    return clf, scaler
+
+
+# Call training_function for Pipeline 2 on the training folder
+p2_clf, p2_scaler = training_function(
+    folder_training_0,   # training folder path
+    im_width=im_width
+)
+[18:16, 2025-12-06] Pratham: X_test_full, y_test_full = load_feature_dataset(folder_training_1, im_width)
+X_test_scaled = p2_scaler.transform(X_test_full)
+
+y_test_pred_p2 = p2_clf.predict(X_test_scaled)
+cm_test_p2 = confusion_matrix(y_test_full, y_test_pred_p2)
+acc_test_p2 = accuracy_score(y_test_full, y_test_pred_p2)
+
+print("Pipeline 2 (engineered Features, no SFS + Logistic Regression) - TEST confusion matrix:")
+print(cm_test_p2)
+print(f"Pipeline 2 (engineered Features, no SFS + Logistic Regression) - TEST accuracy: {acc_test_p2:.4f}")
+
+# --------------------
+# Cell 4
+# --------------------
+
+def training_function_p3(path, im_width=64, n_features_to_select=10):
+    X_full, y = load_feature_dataset(path, im_width)
+    n_features_total = X_full.shape[1]
+
+    n_features_to_select = min(n_features_to_select, n_features_total - 1)
+    print(f"Total features: {n_features_total}, SFS will select: {n_features_to_select}")
+
+    scaler_p3 = StandardScaler()
+    X_scaled = scaler_p3.fit_transform(X_full)
+
+    base_clf = LogisticRegression(max_iter=3000)
+
+    sfs_p3 = SequentialFeatureSelector(
+        base_clf,
+        n_features_to_select=n_features_to_select,
+        direction="forward",
+        cv=5,
+        n_jobs=-1
+    )
+    sfs_p3.fit(X_scaled, y)
+
+    X_sel = sfs_p3.transform(X_scaled)
+
+    clf_p3 = LogisticRegression(max_iter=3000)
+    clf_p3.fit(X_sel, y)
+
+    y_pred_train = clf_p3.predict(X_sel)
+    cm_train_p3 = confusion_matrix(y, y_pred_train)
+    acc_train_p3 = accuracy_score(y, y_pred_train)
+
+    print("Pipeline 3 (engineered + SFS + Logistic Regression) - TRAIN confusion matrix:")
+    print(cm_train_p3)
+    print(f"Pipeline 3 (engineered + SFS + Logistic Regression) - TRAIN accuracy: {acc_train_p3:.4f}")
+    print(f"Selected {X_sel.shape[1]} features out of {X_full.shape[1]}.")
+
+    return clf_p3, scaler_p3, sfs_p3
